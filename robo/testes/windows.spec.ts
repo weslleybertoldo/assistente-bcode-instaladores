@@ -167,9 +167,23 @@ async function abrirPeloPlaywright(exe: string, pasta: string): Promise<AppAbert
 
 const versaoDoApp = (app: ElectronApplication): Promise<string> => app.evaluate(({ app: aplicativo }) => aplicativo.getVersion())
 
-/** A casca e a saudação do Início na tela (e 1 s pras animações de entrada). */
-async function esperarOInicio(janela: Page): Promise<void> {
-  await expect(janela.getByRole('navigation', { name: 'Menu principal' })).toBeVisible({ timeout: 60_000 })
+/**
+ * A casca e a saudação do Início na tela (e 1 s pras animações de entrada).
+ * Desde a W8 (v0.9.0), uma instalação limpa abre na Primeira configuração: tira o print opcional dela
+ * e pula pro Início. Compatível com versões anteriores (v0.8.0) que já abrem direto no Início.
+ */
+async function esperarOInicio(janela: Page, printPrimeiraConfig?: string): Promise<void> {
+  const menu = janela.getByRole('navigation', { name: 'Menu principal' })
+  const primeiraConfig = janela.locator('[data-primeira-config="raiz"]')
+  await expect(menu.or(primeiraConfig)).toBeVisible({ timeout: 60_000 })
+  if (await primeiraConfig.isVisible()) {
+    const pular = janela.locator('[data-pc-acao="pular-tudo"]')
+    await expect(pular).toBeVisible({ timeout: 30_000 })
+    await esperar(500)
+    if (printPrimeiraConfig !== undefined) await janela.screenshot({ path: caminhoDoPrint(printPrimeiraConfig) })
+    await pular.click()
+  }
+  await expect(menu).toBeVisible({ timeout: 60_000 })
   await expect(janela.locator('[data-inicio="saudacao"] h1')).toBeVisible({ timeout: 60_000 })
   await esperar(1_000)
 }
@@ -377,7 +391,7 @@ test('instala, passeia pelas abas em 1366x768 e 1920x1080, confere a integridade
   const primeira = await abrirPeloPlaywright(exe, registro.pasta)
   try {
     expect(await versaoDoApp(primeira.app)).toBe(versao)
-    await esperarOInicio(primeira.janela)
+    await esperarOInicio(primeira.janela, 'windows_primeira_config_1366x768')
     await primeira.janela.screenshot({ path: caminhoDoPrint('windows_1366x768_janela') })
     await printDaTela(caminhoDoPrint('windows_1366x768'))
     await passearPelasAbas(primeira.janela, '1366x768', {
