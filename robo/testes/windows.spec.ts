@@ -1,6 +1,7 @@
 // Robô do Windows (W7): testa o Assistente · B Code instalado de um release deste repositório, de fora
 // pra dentro, como um cliente. Roda no GitHub Actions (windows-2025) pelo .github/workflows/robo-windows.yml:
-//   @teste        instala, abre em 1366x768 e 1920x1080, confere fusíveis e integridade e desinstala
+//   @teste        instala, passeia pelas abas do menu em 1366x768 e 1920x1080, confere fusíveis e integridade
+//                 e desinstala
 //   @atualizacao  instala a versão anterior (N) e atualiza pelo próprio app até a nova (N+1)
 //   @oficial      instala o oficial, confere os fusíveis, abre sem o Playwright, integridade e desinstala
 // Entradas pelo ambiente: ROBO_TIPO (teste | oficial), ROBO_TAG (v<versão>) e ROBO_ANTERIOR (só no teste).
@@ -73,6 +74,7 @@ const PARADOS = [TEXTO.recusada, TEXTO.semAtualizacao, TEXTO.desligada]
 
 const caminhoDoPrint = (nome: string): string => join(PASTA_DOS_PRINTS, `${nome}.png`)
 const instalador = (variante: Variante, versao: string): string => join(PASTA_DOS_INSTALADORES, nomeDoInstalador(variante, versao))
+const limparTexto = (texto: string): string => texto.replace(/\s+/g, ' ').trim()
 
 // ---------------------------------------------------------------- apoio dos testes
 
@@ -126,6 +128,55 @@ async function esperarOInicio(janela: Page): Promise<void> {
   await expect(janela.getByRole('navigation', { name: 'Menu principal' })).toBeVisible({ timeout: 60_000 })
   await expect(janela.locator('[data-inicio="saudacao"] h1')).toBeVisible({ timeout: 60_000 })
   await esperar(1_000)
+}
+
+/**
+ * Os avisos de erro na janela: o EstadoDeErro do app (role alert) e qualquer 'Tentar de novo' (o bloco do
+ * Início que não carregou mostra o botão sem ser alert). Do botão vem o bloco dele, pra ler o que houve.
+ */
+const avisosDeErro = (janela: Page): Locator =>
+  janela.getByRole('alert').or(janela.getByRole('button', { name: 'Tentar de novo' }).locator('..'))
+
+/**
+ * Passeio pelo 'Menu principal', na ordem do menu: cada link abre a aba dele (o link fica como a página
+ * atual), com o título (h1), sem aviso de erro e sem rolagem de lado (na janela e no conteúdo da casca,
+ * o [data-casca="conteudo"] do app). As conferências de cada aba são suaves: o registro mostra todas as
+ * abas com problema na mesma rodada e o teste falha no fim do mesmo jeito. `prints` = aba → nome do print
+ * da janela (a aba é o que vem depois do '#/' no endereço do link).
+ */
+async function passearPelasAbas(janela: Page, resolucao: string, prints: Readonly<Record<string, string>>): Promise<void> {
+  const links = janela.getByRole('navigation', { name: 'Menu principal' }).getByRole('link')
+  const conteudo = janela.locator('[data-casca="conteudo"]')
+  const vistas: string[] = []
+  const total = await links.count()
+  for (let i = 0; i < total; i++) {
+    const link = links.nth(i)
+    const aba = /#\/([^/?#]+)/.exec((await link.getAttribute('href')) ?? '')?.[1]
+    if (aba === undefined) throw new Error(`o ${i + 1}º link do menu não leva a uma aba`)
+    await link.click()
+    await expect(link, `a aba ${aba} não abriu (${resolucao})`).toHaveAttribute('aria-current', 'page')
+    await expect.soft(conteudo.getByRole('heading', { level: 1 }).first(), `o título (h1) da aba ${aba} em ${resolucao}`).toBeVisible()
+    await esperar(1_500) // a aba termina de carregar e de entrar (animação)
+    const erros = (await avisosDeErro(janela).allInnerTexts()).map(limparTexto)
+    expect.soft(erros, `aviso de erro na aba ${aba} em ${resolucao}`).toEqual([])
+    const folga = await janela.evaluate(() => {
+      const areaDoConteudo = document.querySelector<HTMLElement>('[data-casca="conteudo"]')
+      if (areaDoConteudo === null) return null
+      return {
+        pagina: document.documentElement.scrollWidth - document.documentElement.clientWidth,
+        conteudo: areaDoConteudo.scrollWidth - areaDoConteudo.clientWidth,
+      }
+    })
+    if (folga === null) throw new Error('a casca do app não tem mais a área do conteúdo ([data-casca="conteudo"])')
+    expect.soft(folga.pagina, `rolagem de lado na janela, aba ${aba} em ${resolucao}`).toBeLessThanOrEqual(2)
+    expect.soft(folga.conteudo, `rolagem de lado no conteúdo, aba ${aba} em ${resolucao}`).toBeLessThanOrEqual(2)
+    const print = prints[aba]
+    if (print !== undefined) await janela.screenshot({ path: caminhoDoPrint(print) })
+    vistas.push(aba)
+  }
+  const faltam = Object.keys(prints).filter((aba) => !vistas.includes(aba))
+  if (faltam.length > 0) throw new Error(`o menu não tem a aba ${faltam.join(', ')} (abas: ${vistas.join(', ') || 'nenhuma'})`)
+  console.log(`[passeio ${resolucao}] ${vistas.length} abas: ${vistas.join(', ')}`)
 }
 
 /** Ajustes › Atualizações: a seção à vista, já com algum estado, e o atualizador ligado. */
@@ -226,7 +277,7 @@ test.afterEach(async ({}, testInfo) => {
   }
 })
 
-test('instala, abre em 1366x768 e 1920x1080, confere a integridade e desinstala', { tag: '@teste' }, async () => {
+test('instala, passeia pelas abas em 1366x768 e 1920x1080, confere a integridade e desinstala', { tag: '@teste' }, async () => {
   const entradas = lerEntradas()
   if (entradas.tipo !== 'teste') throw new Error('este teste é do tipo teste (no oficial, rode --grep @oficial)')
   const variante = VARIANTES.teste
@@ -246,6 +297,12 @@ test('instala, abre em 1366x768 e 1920x1080, confere a integridade e desinstala'
     await esperarOInicio(primeira.janela)
     await primeira.janela.screenshot({ path: caminhoDoPrint('windows_1366x768_janela') })
     await printDaTela(caminhoDoPrint('windows_1366x768'))
+    await passearPelasAbas(primeira.janela, '1366x768', {
+      inicio: 'windows_inicio_1366x768',
+      conversar: 'windows_conversar_1366x768',
+      agenda: 'windows_agenda_1366x768',
+      ajustes: 'windows_ajustes_1366x768',
+    })
     await abrirAtualizacoes(primeira.janela)
     await primeira.janela.screenshot({ path: caminhoDoPrint('windows_ajustes_atualizacoes') })
   } finally {
@@ -258,6 +315,7 @@ test('instala, abre em 1366x768 e 1920x1080, confere a integridade e desinstala'
   try {
     await esperarOInicio(segunda.janela)
     await printDaTela(caminhoDoPrint('windows_1920x1080'))
+    await passearPelasAbas(segunda.janela, '1920x1080', { ajustes: 'windows_ajustes_1920x1080' })
   } finally {
     await segunda.fechar()
   }
