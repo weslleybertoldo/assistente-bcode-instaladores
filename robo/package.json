@@ -1,0 +1,16 @@
+{
+  "name": "robo-windows",
+  "private": true,
+  "description": "Robô do Windows do Assistente · B Code: testa o app instalado de um release, de fora pra dentro.",
+  "license": "UNLICENSED",
+  "scripts": {
+    "teste": "playwright test"
+  },
+  "devDependencies": {
+    "@electron/fuses": "2.1.3",
+    "@playwright/test": "1.65.1"
+  },
+  "engines": {
+    "node": ">=22.12.0"
+  }
+}

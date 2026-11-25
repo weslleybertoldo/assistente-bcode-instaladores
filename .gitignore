@@ -1,0 +1,9 @@
+# Robô do Windows: dependências, instaladores baixados dos releases e prints (vão como artefato do run).
+node_modules/
+robo/instaladores/
+robo/prints/
+robo/test-results/
+
+# Defesa a mais: chave nunca entra aqui (as privadas da B Code ficam só no cofre).
+*.pem
+*.key

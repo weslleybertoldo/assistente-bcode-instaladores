@@ -1,0 +1,159 @@
+# Robô do Windows do Assistente · B Code. Baixa o instalador de um release DESTE repositório (nunca código
+# do app) e testa como um cliente, num Windows Server 2025 limpo: instala em silêncio, abre, tira os prints,
+# confere fusíveis e integridade, prova a atualização N → N+1 (canal teste) e desinstala (robo/).
+# Quem dispara é o script de publicar da B Code ou alguém pela aba Actions; nunca um pull request.
+# Registro e prints são públicos: só dados de teste (o app abre com a pasta de dados vazia).
+name: robo-windows
+run-name: Robô do Windows · ${{ inputs.tipo }} · ${{ inputs.tag }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag do release (ex.: v0.8.0-teste.131 no teste, v0.8.0 no oficial)'
+        required: true
+        type: string
+      anterior:
+        description: 'Só no teste: tag da versão anterior (N), pra provar a atualização N → N+1 pelo app'
+        required: false
+        type: string
+        default: ''
+      tipo:
+        description: 'teste (pré-lançamento) ou oficial (estável)'
+        required: true
+        type: choice
+        options:
+          - teste
+          - oficial
+        default: teste
+
+# Só leitura: baixar o repositório e os anexos dos releases (públicos). Nenhum segredo.
+permissions:
+  contents: read
+
+concurrency:
+  group: robo-windows
+  cancel-in-progress: false
+
+jobs:
+  sem-chave:
+    name: Nenhuma chave privada no histórico
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Baixar o repositório com o histórico inteiro
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Procurar chave privada no histórico e nos arquivos
+        run: |
+          # Os 2 textos procurados são montados aqui, a partir dos bytes: este arquivo não contém nenhum deles.
+          # 1) O começo de toda chave privada Ed25519 em PKCS#8 (base64 dos bytes 30 2e 02 01 00 30 05 06 03 2b 65 70).
+          prefixo="$(printf '\060\056\002\001\000\060\005\006\003\053\145\160' | base64)"
+          # 2) O fim do cabeçalho PEM de qualquer chave privada.
+          cabecalho="$(printf '%s %s-----' PRIVATE KEY)"
+          # A montagem tem de dar certo; senão a busca passaria sem procurar nada.
+          [ "$(printf '%s' "$prefixo" | base64 -d | od -An -tx1 | tr -d ' \n')" = '302e020100300506032b6570' ] || { echo '::error::Prefixo montado errado.'; exit 1; }
+          [ "${#cabecalho}" -eq 16 ] || { echo '::error::Cabeçalho montado errado.'; exit 1; }
+
+          achou=0
+          # Histórico inteiro (todas as refs) com o conteúdo de cada mudança; no registro só saem a contagem e os commits.
+          git log --all -p --text --no-color > "$RUNNER_TEMP/historico.txt"
+          linhas="$(grep -c -F -e "$prefixo" -e "$cabecalho" "$RUNNER_TEMP/historico.txt" || true)"
+          if [ "$linhas" != 0 ]; then
+            achou=1
+            echo "::error::Chave privada no histórico (${linhas:-?} linha(s)). Commits:"
+            for texto in "$prefixo" "$cabecalho"; do git log --all --format='%H %s' -S"$texto"; done | sort -u
+          fi
+          # Arquivos da árvore atual (no registro só saem os nomes).
+          if git grep -l --text -F -e "$prefixo" -e "$cabecalho"; then
+            achou=1
+            echo '::error::Chave privada nos arquivos acima.'
+          fi
+          [ "$achou" = 0 ] || exit 1
+          echo "Nenhuma chave privada em $(git rev-list --all --count) commit(s) nem nos arquivos."
+
+  windows:
+    name: Windows (instala, abre, atualiza e desinstala)
+    runs-on: windows-2025
+    timeout-minutes: 45
+    # As entradas só entram pelo ambiente (nunca no texto dos comandos) e o 1º passo confere cada uma.
+    env:
+      ROBO_TAG: ${{ inputs.tag }}
+      ROBO_ANTERIOR: ${{ inputs.anterior }}
+      ROBO_TIPO: ${{ inputs.tipo }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Conferir as entradas
+        run: |
+          export LC_ALL=C
+          falhar() { echo "::error::$1"; exit 1; }
+          case "$ROBO_TIPO" in
+            teste) formato='^v[0-9]+\.[0-9]+\.[0-9]+-teste\.[0-9]+$' ;;
+            oficial) formato='^v[0-9]+\.[0-9]+\.[0-9]+$' ;;
+            *) falhar 'O tipo tem de ser teste ou oficial.' ;;
+          esac
+          if [ "${#ROBO_TAG}" -gt 41 ] || ! [[ "$ROBO_TAG" =~ $formato ]]; then
+            falhar "Tag fora do formato do tipo $ROBO_TIPO (ex.: v0.8.0-teste.131 no teste, v0.8.0 no oficial)."
+          fi
+          if [ -n "$ROBO_ANTERIOR" ]; then
+            [ "$ROBO_TIPO" = teste ] || falhar 'A anterior só vale no tipo teste.'
+            if [ "${#ROBO_ANTERIOR}" -gt 41 ] || ! [[ "$ROBO_ANTERIOR" =~ $formato ]]; then
+              falhar 'Anterior fora do formato do teste (ex.: v0.8.0-teste.130).'
+            fi
+            [ "$ROBO_ANTERIOR" != "$ROBO_TAG" ] || falhar 'A anterior é igual à tag.'
+          fi
+          echo "Entradas conferidas: tipo $ROBO_TIPO, tag $ROBO_TAG, anterior ${ROBO_ANTERIOR:-nenhuma}."
+
+      - name: Baixar o repositório
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Node 22
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+          package-manager-cache: false
+
+      - name: Instalar o Playwright e o @electron/fuses (sem navegador, sem scripts)
+        working-directory: robo
+        run: npm ci --ignore-scripts --no-audit --no-fund
+
+      - name: Baixar os instaladores do release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p robo/instaladores
+          baixar() {
+            local versao="${1#v}" nome
+            if [ "$ROBO_TIPO" = teste ]; then nome="assistente-bcode-teste-${versao}-setup.exe"; else nome="assistente-bcode-${versao}-setup.exe"; fi
+            gh release download "$1" --repo "$GITHUB_REPOSITORY" --pattern "$nome" --dir robo/instaladores
+            test -s "robo/instaladores/$nome"
+            echo "Baixado: $nome ($(wc -c < "robo/instaladores/$nome") bytes)"
+          }
+          baixar "$ROBO_TAG"
+          if [ -n "$ROBO_ANTERIOR" ]; then baixar "$ROBO_ANTERIOR"; fi
+
+      - name: Testes do Windows
+        working-directory: robo
+        run: |
+          grep='@oficial'
+          if [ "$ROBO_TIPO" = teste ]; then
+            grep='@teste'
+            if [ -n "$ROBO_ANTERIOR" ]; then grep='@teste|@atualizacao'; fi
+          fi
+          npx playwright test --grep "$grep"
+
+      - name: Guardar os prints
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: prints-windows
+          path: robo/prints
+          retention-days: 30
+          if-no-files-found: warn
