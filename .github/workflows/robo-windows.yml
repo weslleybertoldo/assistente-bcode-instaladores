@@ -1,6 +1,7 @@
 # Robô do Windows do Assistente · B Code. Baixa o instalador de um release DESTE repositório (nunca código
-# do app) e testa como um cliente, num Windows Server 2025 limpo: instala em silêncio, abre, tira os prints,
-# confere fusíveis e integridade, prova a atualização N → N+1 (canal teste) e desinstala (robo/).
+# do app) e testa como um cliente, num Windows Server 2025 limpo: instala em silêncio, abre, passeia pelas
+# abas, tira os prints, confere fusíveis e integridade, prova a atualização N → N+1 (no teste pelo clique e
+# sem clique; no oficial sem clique, o caminho da estável) e desinstala (robo/).
 # Quem dispara é o script de publicar da B Code ou alguém pela aba Actions; nunca um pull request.
 # Registro e prints são públicos: só dados de teste (o app abre com a pasta de dados vazia).
 name: robo-windows
@@ -14,7 +15,7 @@ on:
         required: true
         type: string
       anterior:
-        description: 'Só no teste: tag da versão anterior (N), pra provar a atualização N → N+1 pelo app'
+        description: 'Tag da versão anterior (N), do mesmo tipo, pra provar a atualização N → N+1 (no teste: pelo clique e sem clique; no oficial: só sem clique)'
         required: false
         type: string
         default: ''
@@ -101,9 +102,8 @@ jobs:
             falhar "Tag fora do formato do tipo $ROBO_TIPO (ex.: v0.8.0-teste.131 no teste, v0.8.0 no oficial)."
           fi
           if [ -n "$ROBO_ANTERIOR" ]; then
-            [ "$ROBO_TIPO" = teste ] || falhar 'A anterior só vale no tipo teste.'
             if [ "${#ROBO_ANTERIOR}" -gt 41 ] || ! [[ "$ROBO_ANTERIOR" =~ $formato ]]; then
-              falhar 'Anterior fora do formato do teste (ex.: v0.8.0-teste.130).'
+              falhar "Anterior fora do formato do tipo $ROBO_TIPO (ex.: v0.8.0-teste.130 no teste, v0.8.0 no oficial)."
             fi
             [ "$ROBO_ANTERIOR" != "$ROBO_TAG" ] || falhar 'A anterior é igual à tag.'
           fi
@@ -142,11 +142,16 @@ jobs:
       - name: Testes do Windows
         working-directory: robo
         run: |
-          grep='@oficial'
-          if [ "$ROBO_TIPO" = teste ]; then
-            grep='@teste'
-            if [ -n "$ROBO_ANTERIOR" ]; then grep='@teste|@atualizacao'; fi
-          fi
+          # Com a anterior: no teste, também a atualização pelo clique e a sem clique; no oficial (a rodada
+          # do publicar estável depois de apontar o canal), só a sem clique.
+          case "$ROBO_TIPO:${ROBO_ANTERIOR:+com-anterior}" in
+            teste:) grep='@teste' ;;
+            teste:com-anterior) grep='@teste|@atualizacao|@sem-clique' ;;
+            oficial:) grep='@oficial' ;;
+            oficial:com-anterior) grep='@sem-clique' ;;
+            *) echo '::error::Tipo fora da lista.'; exit 1 ;;
+          esac
+          echo "Testes: $grep"
           npx playwright test --grep "$grep"
 
       - name: Guardar os prints

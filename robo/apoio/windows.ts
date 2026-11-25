@@ -1,12 +1,13 @@
 // Apoio do robô no Windows, de fora pra dentro, como um cliente (nada aqui conhece o código do app):
 // instalar e desinstalar em silêncio, ler o registro de desinstalação, achar e fechar os processos do
-// app, ler os fusíveis do .exe, mexer no cabeçalho do app.asar de uma cópia e falar com a tela (tela.ps1).
+// app, esperar a versão nova que o app baixou (pasta do atualizador) e rodar o instalador dela como o
+// app roda, ler os fusíveis do .exe, mexer no cabeçalho do app.asar de uma cópia e falar com a tela (tela.ps1).
 // Fatos medidos pela sessão no windows-2025 em 25/11/2026: instalação por usuário em
 // %LOCALAPPDATA%\Programs\<nome> em ~20 s; a chave de desinstalação NÃO traz o InstallLocation (o NSIS
 // grava ele em outra chave), então a pasta sai do QuietUninstallString.
 import { FuseState, FuseV1Options, getCurrentFuseWire } from '@electron/fuses'
 import { execFile, spawn, type ChildProcess } from 'node:child_process'
-import { closeSync, cpSync, existsSync, mkdirSync, openSync, readSync, rmSync, writeSync } from 'node:fs'
+import { closeSync, cpSync, existsSync, mkdirSync, openSync, readSync, readdirSync, rmSync, writeSync } from 'node:fs'
 import { basename, dirname, join } from 'node:path'
 import { setTimeout as esperar } from 'node:timers/promises'
 import { promisify } from 'node:util'
@@ -59,11 +60,11 @@ export interface Entradas {
   tipo: Tipo
   tag: string
   versao: string
-  /** Só no teste: a versão N da atualização N → N+1. */
+  /** A versão N da atualização N → N+1, no formato do tipo (teste: pelo clique e sem clique; oficial: sem clique). */
   anterior: { tag: string; versao: string } | null
 }
 
-/** Lê ROBO_TIPO, ROBO_TAG e ROBO_ANTERIOR (o workflow já conferiu; aqui confere de novo). */
+/** Lê ROBO_TIPO, ROBO_TAG e ROBO_ANTERIOR (o workflow já conferiu; aqui confere de novo, no formato do tipo). */
 export function lerEntradas(ambiente: NodeJS.ProcessEnv = process.env): Entradas {
   const tipo = ambiente.ROBO_TIPO
   if (tipo !== 'teste' && tipo !== 'oficial') throw new Error('ROBO_TIPO tem de ser teste ou oficial.')
@@ -79,7 +80,6 @@ export function lerEntradas(ambiente: NodeJS.ProcessEnv = process.env): Entradas
   const versao = versaoDa(tag, 'ROBO_TAG')
   const tagAnterior = ambiente.ROBO_ANTERIOR ?? ''
   if (tagAnterior === '') return { tipo, tag, versao, anterior: null }
-  if (tipo !== 'teste') throw new Error('ROBO_ANTERIOR só vale no tipo teste.')
   return { tipo, tag, versao, anterior: { tag: tagAnterior, versao: versaoDa(tagAnterior, 'ROBO_ANTERIOR') } }
 }
 
@@ -213,11 +213,52 @@ async function esperarAte(condicao: () => Promise<boolean>, limiteMs: number, ex
   }
 }
 
-/** Instalação silenciosa (/S), por usuário, sem pedir nada. */
-export async function instalar(instalador: string): Promise<void> {
+/** Instalação silenciosa (/S), por usuário, sem pedir nada; ou com os argumentos dados. */
+export async function instalar(instalador: string, argumentos: readonly string[] = ['/S']): Promise<void> {
   if (!existsSync(instalador)) throw new Error(`instalador não encontrado: ${basename(instalador)}`)
-  const codigo = await rodarAteOFim(instalador, ['/S'], 5 * 60_000)
+  const codigo = await rodarAteOFim(instalador, [...argumentos], 5 * 60_000)
   if (codigo !== 0) throw new Error(`o instalador ${basename(instalador)} terminou com o código ${codigo}`)
+}
+
+/**
+ * Os argumentos que o app passa pro instalador baixado no 'Instalar agora': os do install(true, true) do
+ * electron-updater 6.8 (NsisUpdater.doInstall). Instala por cima, em silêncio, fecha o app aberto sozinho
+ * (o NSIS pede pra fechar e depois força) e, no fim, abre o app de novo com --updated.
+ */
+export const ARGUMENTOS_DA_ATUALIZACAO = ['--updated', '/S', '--force-run'] as const
+
+/**
+ * Onde o electron-updater 6.8 do app guarda a versão baixada:
+ * %LOCALAPPDATA%\<nome>-updater\pending (o updaterCacheDirName que o electron-builder grava no app).
+ */
+export function pastaDoPendente(variante: Variante): string {
+  return join(pastaDoSistema('LOCALAPPDATA'), `${variante.nome}-updater`, 'pending')
+}
+
+/** Os nomes dos arquivos da pasta (pro erro: só nomes, que levam a versão). */
+function nomesNaPasta(pasta: string): string {
+  if (!existsSync(pasta)) return 'a pasta não existe'
+  return readdirSync(pasta).join(', ') || 'vazia'
+}
+
+/**
+ * Espera o app aberto deixar a versão pronta no pendente: o update-info.json e o instalador com o nome
+ * final. Durante o download o arquivo se chama temp-<nome>; o electron-updater só dá o nome final depois
+ * de conferir o sha512 (e grava o update-info.json logo em seguida). O app que fecha no caminho falha na
+ * hora. Devolve o caminho do instalador.
+ */
+export async function esperarPendente(variante: Variante, versao: string, app: ChildProcess, limiteMs: number): Promise<string> {
+  const pasta = pastaDoPendente(variante)
+  const instalador = join(pasta, nomeDoInstalador(variante, versao))
+  await esperarAte(
+    async () => {
+      if (saiu(app)) throw new Error(`o app fechou sozinho (código ${app.exitCode}) antes de deixar a versão ${versao} pronta`)
+      return existsSync(join(pasta, 'update-info.json')) && existsSync(instalador)
+    },
+    limiteMs,
+    async () => `a versão ${versao} não ficou pronta no pendente em ${limiteMs / 1000} s (arquivos: ${nomesNaPasta(pasta)})`,
+  )
+  return instalador
 }
 
 export interface Registro {

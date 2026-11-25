@@ -4,8 +4,13 @@
 //                 e desinstala
 //   @atualizacao  instala a versão anterior (N) e atualiza pelo próprio app até a nova (N+1), pelo clique,
 //                 com o print da caixa do 'Instalar agora' e o log windows_atualizacao_teste.log
+//   @sem-clique   o caminho da estável, nos 2 tipos: instala a anterior (N), abre sem o Playwright, espera o
+//                 app deixar a N+1 pronta na pasta do atualizador e roda esse instalador como o app roda
+//                 (log windows_atualizacao_<tipo>_sem_clique.log)
 //   @oficial      instala o oficial, confere os fusíveis, abre sem o Playwright, integridade e desinstala
-// Entradas pelo ambiente: ROBO_TIPO (teste | oficial), ROBO_TAG (v<versão>) e ROBO_ANTERIOR (só no teste).
+// Entradas pelo ambiente: ROBO_TIPO (teste | oficial), ROBO_TAG (v<versão>) e ROBO_ANTERIOR (a N, no formato
+// do tipo). O workflow escolhe os testes: teste = @teste (+ @atualizacao e @sem-clique com a anterior);
+// oficial = @oficial (sem a anterior) ou só @sem-clique (com a anterior, depois de o canal estável apontar).
 // Prints em robo/prints (o workflow guarda como 'prints-windows'). O registro é público: o app abre com
 // a pasta de dados vazia (sem nome e sem chave) e o log só leva versão e estado.
 // Os textos da seção Atualizações são os da tela do app (renderer/fluxos/atualizacao/textos.ts no
@@ -13,9 +18,10 @@
 import { _electron as electron, expect, test, type ElectronApplication, type Locator, type Page } from '@playwright/test'
 import { appendFileSync, existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join, resolve } from 'node:path'
+import { basename, join, resolve } from 'node:path'
 import { setTimeout as esperar } from 'node:timers/promises'
 import {
+  ARGUMENTOS_DA_ATUALIZACAO,
   ARQUIVO_QUE_A_ABERTURA_NAO_LE,
   TITULO_DO_PAINEL,
   VARIANTES,
@@ -26,6 +32,7 @@ import {
   desinstalar,
   esperarFimSemJanela,
   esperarJanela,
+  esperarPendente,
   esperarProcessoPrincipal,
   esperarRegistro,
   fecharProcessosDaPasta,
@@ -43,6 +50,7 @@ import {
   printDaTela,
   semCaixaDeErroDoWindows,
   type Registro,
+  type Tipo,
   type Variante,
 } from '../apoio/windows'
 
@@ -51,8 +59,14 @@ const PASTA_DOS_PRINTS = join(RAIZ, 'prints')
 /** O workflow baixa aqui os instaladores do release (da tag e da anterior). */
 const PASTA_DOS_INSTALADORES = join(RAIZ, 'instaladores')
 
-/** O app de teste procura versão nova na rota de produção, que aponta pros anexos deste repositório. */
-const ROTA_DO_CANAL_TESTE = 'https://assistente.bcode.software/api/atualizacao/teste/teste.yml'
+/**
+ * O app procura versão nova na rota de produção, que aponta pros anexos deste repositório: o arquivo do
+ * canal do Windows de cada variante (teste → canal teste; oficial → canal estável).
+ */
+const ROTAS_DOS_CANAIS: Record<Tipo, { canal: string; endereco: string; arquivo: string }> = {
+  teste: { canal: 'teste', endereco: 'https://assistente.bcode.software/api/atualizacao/teste/teste.yml', arquivo: 'teste.yml' },
+  oficial: { canal: 'estável', endereco: 'https://assistente.bcode.software/api/atualizacao/estavel/latest.yml', arquivo: 'latest.yml' },
+}
 const ANEXOS = 'https://github.com/weslleybertoldo/assistente-bcode-instaladores/releases/download'
 
 /** Desde a W5 o app abre 2 janelas (painel e barra): o painel se acha pelo endereço. */
@@ -277,12 +291,13 @@ async function esperarNaSecao(
   }
 }
 
-/** O app de teste segue a rota de produção: o canal teste já tem de apontar pra tag nova. */
-async function conferirRotaDoCanalTeste(tag: string): Promise<void> {
-  const resposta = await fetch(ROTA_DO_CANAL_TESTE, { redirect: 'manual', signal: AbortSignal.timeout(15_000) })
-  expect(resposta.status, 'a rota do canal teste respondeu sem redirecionar').toBe(302)
-  expect(resposta.headers.get('location'), `o canal teste ainda não aponta pra ${tag} (a rota leva até ~6 min depois do publicar)`).toBe(
-    `${ANEXOS}/${tag}/teste.yml`,
+/** O app segue a rota de produção: o canal da variante já tem de apontar pra tag nova. */
+async function conferirRotaDoCanal(variante: Variante, tag: string): Promise<void> {
+  const { canal, endereco, arquivo } = ROTAS_DOS_CANAIS[variante.tipo]
+  const resposta = await fetch(endereco, { redirect: 'manual', signal: AbortSignal.timeout(15_000) })
+  expect(resposta.status, `a rota do canal ${canal} respondeu sem redirecionar`).toBe(302)
+  expect(resposta.headers.get('location'), `o canal ${canal} ainda não aponta pra ${tag} (a rota leva até ~6 min depois do publicar)`).toBe(
+    `${ANEXOS}/${tag}/${arquivo}`,
   )
 }
 
@@ -400,7 +415,7 @@ test('atualiza N → N+1 pelo app', { tag: '@atualizacao' }, async () => {
   // O log é aberto antes de tudo: se o teste cair no meio, o artefato leva o que já aconteceu.
   const anotar = abrirLog('windows_atualizacao_teste')
   anotar(`atualização ${anterior.versao} → ${nova} pelo clique (canal teste)`)
-  await conferirRotaDoCanalTeste(tag)
+  await conferirRotaDoCanal(variante, tag)
   anotar(`rota do canal teste aponta pra ${tag}`)
 
   limparDadosDoApp(variante)
@@ -467,6 +482,54 @@ test('atualiza N → N+1 pelo app', { tag: '@atualizacao' }, async () => {
   } finally {
     await novo.fechar()
   }
+  await desinstalar(variante, registro)
+  anotar('desinstalado')
+})
+
+test('atualiza N → N+1 sem clique, como na estável', { tag: '@sem-clique' }, async () => {
+  const { tipo, tag, versao: nova, anterior } = lerEntradas()
+  if (!anterior) throw new Error('a atualização sem clique precisa de ROBO_ANTERIOR')
+  if (compararVersoes(anterior.versao, nova) >= 0) throw new Error(`a anterior (${anterior.versao}) tem de ser menor que a nova (${nova})`)
+  const variante = VARIANTES[tipo]
+  const { canal } = ROTAS_DOS_CANAIS[tipo]
+  // O log é aberto antes de tudo: se o teste cair no meio, o artefato leva o que já aconteceu.
+  const anotar = abrirLog(`windows_atualizacao_${tipo}_sem_clique`)
+  anotar(`atualização ${anterior.versao} → ${nova} sem clique (canal ${canal})`)
+  await conferirRotaDoCanal(variante, tag)
+  anotar(`rota do canal ${canal} aponta pra ${tag}`)
+
+  limparDadosDoApp(variante)
+  await instalar(instalador(variante, anterior.versao))
+  const registroDaAnterior = await esperarRegistro(variante, anterior.versao)
+  const exe = conferirInstalacao(variante, registroDaAnterior, anterior.versao)
+  anotar(`versão antes: DisplayVersion ${registroDaAnterior.versao}`)
+
+  // Como um clique no atalho (o oficial não abre no Playwright): modo normal, pasta de dados vazia e a rota
+  // de produção. A 1ª busca é 1 minuto depois de abrir; aí o app confere a assinatura e baixa (~142 MB).
+  await mudarResolucao(1366, 768)
+  await minimizarTudo()
+  const aberto = abrirSemPlaywright(exe)
+  await esperarJanela(aberto, TITULO_DO_PAINEL, 30_000)
+  anotar('app aberto sem o Playwright')
+  const pendente = await esperarPendente(variante, nova, aberto, 8 * 60_000)
+  anotar(`baixada e conferida pelo sha512: update-info.json e ${basename(pendente)} no pendente`)
+  // Logo depois o app confere o arquivo de novo (o sha512 do manifesto assinado): se recusar, ele apaga.
+  await esperar(15_000)
+  expect(existsSync(pendente), `o app apagou ${basename(pendente)}: recusou a versão baixada na 2ª conferência`).toBe(true)
+  anotar('o instalador continua no pendente 15 s depois (a 2ª conferência do app passou)')
+  await printDaTela(caminhoDoPrint(`windows_${tipo}_pronta_sem_clique`))
+
+  // O que o 'Instalar agora' faz: roda o instalador baixado com os argumentos do install(true, true).
+  anotar(`roda ${basename(pendente)} ${ARGUMENTOS_DA_ATUALIZACAO.join(' ')}`)
+  await instalar(pendente, ARGUMENTOS_DA_ATUALIZACAO)
+  anotar('o instalador terminou (código 0)')
+  const registro = await esperarRegistro(variante, nova, 3 * 60_000)
+  anotar(`DisplayVersion depois: ${registro.versao}`)
+  const reaberto = await esperarProcessoPrincipal(registro.pasta, exe, 3 * 60_000)
+  anotar(`processo reaberto ${reaberto.linha.includes('--updated') ? 'com' : 'SEM'} --updated`)
+  expect(reaberto.linha, 'o app reaberto pelo instalador leva --updated').toContain('--updated')
+  await fecharProcessosDaPasta(registro.pasta)
+  anotar('app fechado')
   await desinstalar(variante, registro)
   anotar('desinstalado')
 })
