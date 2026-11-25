@@ -4,5 +4,10 @@
     "versao": "0.8.0-teste.51",
     "tag": "v0.8.0-teste.51",
     "publicado_em": "2026-11-25T16:47:28.475Z"
+  },
+  "estavel": {
+    "versao": "0.8.0",
+    "tag": "v0.8.0",
+    "publicado_em": "2026-11-25T17:08:05.825Z"
   }
 }
