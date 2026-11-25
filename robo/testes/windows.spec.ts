@@ -61,13 +61,13 @@ const TEXTO = {
   emDia: 'Você está na versão mais nova.',
   pronta: 'Pronta pra instalar',
   encontrada: 'encontrada.',
-  recusada: 'A versão nova foi recusada',
+  recusada: 'A atualização foi recusada',
   semAtualizacao: 'Sem atualização agora',
   desligada: 'não procura versão nova sozinha',
 } as const
 /** Algum estado já desenhado na seção (antes disso ela mostra o esqueleto). */
 const ALGUM_ESTADO =
-  /Ainda não procurei versão nova|Você está na versão mais nova|Procurando versão nova|encontrada\.|Baixando a versão|Conferindo o arquivo|Pronta pra instalar|Fechando o app pra instalar|A versão nova foi recusada|Sem atualização agora|não procura versão nova sozinha/
+  /Ainda não procurei versão nova|Você está na versão mais nova|Procurando versão nova|encontrada\.|Baixando a versão|Conferindo o arquivo|Pronta pra instalar|Preparando a instalação|A atualização foi recusada|Sem atualização agora|não procura versão nova sozinha/
 /** Estados parados (não mudam sozinhos por 1 h ou mais): se aparecerem no lugar do esperado, falha na hora. */
 const PARADOS = [TEXTO.recusada, TEXTO.semAtualizacao, TEXTO.desligada]
 
