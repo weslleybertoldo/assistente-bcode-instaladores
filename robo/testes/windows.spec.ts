@@ -2,7 +2,8 @@
 // pra dentro, como um cliente. Roda no GitHub Actions (windows-2025) pelo .github/workflows/robo-windows.yml:
 //   @teste        instala, passeia pelas abas do menu em 1366x768 e 1920x1080, confere fusíveis e integridade
 //                 e desinstala
-//   @atualizacao  instala a versão anterior (N) e atualiza pelo próprio app até a nova (N+1)
+//   @atualizacao  instala a versão anterior (N) e atualiza pelo próprio app até a nova (N+1), pelo clique,
+//                 com o print da caixa do 'Instalar agora' e o log windows_atualizacao_teste.log
 //   @oficial      instala o oficial, confere os fusíveis, abre sem o Playwright, integridade e desinstala
 // Entradas pelo ambiente: ROBO_TIPO (teste | oficial), ROBO_TAG (v<versão>) e ROBO_ANTERIOR (só no teste).
 // Prints em robo/prints (o workflow guarda como 'prints-windows'). O registro é público: o app abre com
@@ -10,7 +11,7 @@
 // Os textos da seção Atualizações são os da tela do app (renderer/fluxos/atualizacao/textos.ts no
 // repositório do app): mudou lá, muda aqui.
 import { _electron as electron, expect, test, type ElectronApplication, type Locator, type Page } from '@playwright/test'
-import { existsSync, mkdtempSync, realpathSync, rmSync } from 'node:fs'
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { setTimeout as esperar } from 'node:timers/promises'
@@ -57,24 +58,53 @@ const ANEXOS = 'https://github.com/weslleybertoldo/assistente-bcode-instaladores
 /** Desde a W5 o app abre 2 janelas (painel e barra): o painel se acha pelo endereço. */
 const ENDERECO_DO_PAINEL = '/painel/index.html'
 
-/** Textos da seção Ajustes › Atualizações. */
-const TEXTO = {
-  emDia: 'Você está na versão mais nova.',
-  pronta: 'Pronta pra instalar',
-  encontrada: 'encontrada.',
+/**
+ * Os estados da seção Ajustes › Atualizações pelo texto da tela, do mais forte pro mais fraco: o estado é
+ * o 1º desta lista cujo texto aparece na seção.
+ */
+const ESTADOS = {
+  desligada: 'não procura versão nova sozinha',
   recusada: 'A atualização foi recusada',
   semAtualizacao: 'Sem atualização agora',
-  desligada: 'não procura versão nova sozinha',
+  instalando: 'Preparando a instalação',
+  pronta: 'Pronta pra instalar',
+  conferindo: 'Conferindo o arquivo',
+  baixando: 'Baixando a versão',
+  encontrada: 'encontrada.',
+  procurando: 'Procurando versão nova',
+  emDia: 'Você está na versão mais nova.',
+  nuncaProcurou: 'Ainda não procurei versão nova',
 } as const
+type Estado = keyof typeof ESTADOS
+const ORDEM_DOS_ESTADOS = Object.keys(ESTADOS) as Estado[]
+/** Onde começam as notas da versão na seção: texto livre, que pode repetir qualquer frase da tela. */
+const NOTAS = 'O que muda'
 /** Algum estado já desenhado na seção (antes disso ela mostra o esqueleto). */
-const ALGUM_ESTADO =
-  /Ainda não procurei versão nova|Você está na versão mais nova|Procurando versão nova|encontrada\.|Baixando a versão|Conferindo o arquivo|Pronta pra instalar|Preparando a instalação|A atualização foi recusada|Sem atualização agora|não procura versão nova sozinha/
+const ALGUM_ESTADO = new RegExp(Object.values(ESTADOS).map((texto) => texto.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|'))
 /** Estados parados (não mudam sozinhos por 1 h ou mais): se aparecerem no lugar do esperado, falha na hora. */
-const PARADOS = [TEXTO.recusada, TEXTO.semAtualizacao, TEXTO.desligada]
+const PARADOS: readonly Estado[] = ['recusada', 'semAtualizacao', 'desligada']
 
 const caminhoDoPrint = (nome: string): string => join(PASTA_DOS_PRINTS, `${nome}.png`)
 const instalador = (variante: Variante, versao: string): string => join(PASTA_DOS_INSTALADORES, nomeDoInstalador(variante, versao))
 const limparTexto = (texto: string): string => texto.replace(/\s+/g, ' ').trim()
+
+/** Anota um evento no log do teste. */
+type Anotar = (evento: string) => void
+
+/**
+ * Log de um teste em robo/prints/<nome>.log (vai no artefato 'prints-windows' e sai também no registro):
+ * 1 linha por evento, com a hora UTC. Só versão e estado, nada da pasta de dados do app.
+ */
+function abrirLog(nome: string): Anotar {
+  const arquivo = join(PASTA_DOS_PRINTS, `${nome}.log`)
+  mkdirSync(PASTA_DOS_PRINTS, { recursive: true })
+  writeFileSync(arquivo, '')
+  return (evento) => {
+    const linha = `${new Date().toISOString()} ${evento}`
+    appendFileSync(arquivo, `${linha}\n`)
+    console.log(`[${nome}] ${linha}`)
+  }
+}
 
 // ---------------------------------------------------------------- apoio dos testes
 
@@ -186,26 +216,64 @@ async function abrirAtualizacoes(janela: Page): Promise<Locator> {
   await expect(secao).toBeVisible()
   await secao.scrollIntoViewIfNeeded()
   await expect(secao).toContainText(ALGUM_ESTADO)
-  await expect(secao, 'o atualizador está desligado nesta cópia do app').not.toContainText(TEXTO.desligada)
+  await expect(secao, 'o atualizador está desligado nesta cópia do app').not.toContainText(ESTADOS.desligada)
   return secao
 }
 
 /** "Procurar agora". A 1ª busca sozinha (1 minuto depois de abrir) pode já ter começado: aí o botão some e ela segue. */
-async function procurarAgora(secao: Locator): Promise<void> {
+async function procurarAgora(secao: Locator, anotar: Anotar): Promise<void> {
   const botao = secao.getByRole('button', { name: 'Procurar agora', exact: true })
-  if (await botao.isVisible()) await botao.click({ timeout: 10_000 }).catch(() => undefined)
+  const clicou = (await botao.isVisible()) && (await botao.click({ timeout: 10_000 }).then(() => true, () => false))
+  anotar(clicou ? 'clique: Procurar agora' : 'sem o Procurar agora na tela (a busca sozinha já começou)')
   await esperar(1_000)
 }
 
-/** Espera o texto na seção; outro estado parado no lugar falha na hora, com o que a seção mostra. */
-async function esperarNaSecao(secao: Locator, alvo: string, falhas: readonly string[], limiteMs: number): Promise<void> {
+const primeiroEstado = (texto: string): Estado | null => ORDEM_DOS_ESTADOS.find((estado) => texto.includes(ESTADOS[estado])) ?? null
+
+/** O estado se lê antes das notas da versão; só se não achar lá, no texto todo. */
+const estadoDaSecao = (texto: string): Estado | null => primeiroEstado(texto.split(NOTAS)[0] ?? '') ?? primeiroEstado(texto)
+
+/** As versões que a seção mostra além da instalada (a nova que ela achou, baixa ou tem pronta), fora das notas. */
+function versoesNovas(texto: string, instalada: string): string[] {
+  const achadas = (texto.split(NOTAS)[0] ?? '').match(/\d+\.\d+\.\d+(?:-teste\.\d+)?/g) ?? []
+  return [...new Set(achadas)].filter((versao) => versao !== instalada)
+}
+
+interface LeituraDaSecao {
+  texto: string
+  estado: Estado | null
+}
+
+/** Lê a seção e anota no log cada estado novo que aparece (com a versão nova, quando a tela mostra). */
+function leitorDaSecao(secao: Locator, instalada: string, anotar: Anotar): () => Promise<LeituraDaSecao> {
+  let ultimo = ''
+  return async () => {
+    const texto = limparTexto(await secao.innerText().catch(() => ''))
+    const estado = estadoDaSecao(texto)
+    const novas = versoesNovas(texto, instalada)
+    const resumo = `${estado ?? 'sem estado'}${novas.length > 0 ? ` (${novas.join(', ')})` : ''}`
+    if (resumo !== ultimo) anotar(`seção: ${resumo}`)
+    ultimo = resumo
+    return { texto, estado }
+  }
+}
+
+/** Espera o estado na seção; outro estado parado no lugar falha na hora, com o que a seção mostra. */
+async function esperarNaSecao(
+  ler: () => Promise<LeituraDaSecao>,
+  alvo: Estado,
+  falhas: readonly Estado[],
+  limiteMs: number,
+): Promise<void> {
   const prazo = Date.now() + limiteMs
   for (;;) {
-    const texto = (await secao.innerText().catch(() => '')).replace(/\s+/g, ' ').trim()
-    if (texto.includes(alvo)) return
-    if (falhas.some((falha) => texto.includes(falha))) throw new Error(`esperava "${alvo}", mas a seção Atualizações mostra: ${texto}`)
-    if (Date.now() > prazo) throw new Error(`"${alvo}" não apareceu em ${limiteMs / 1000} s. A seção Atualizações mostra: ${texto}`)
-    await esperar(2_000)
+    const { texto, estado } = await ler()
+    if (estado === alvo) return
+    if (estado !== null && falhas.includes(estado)) {
+      throw new Error(`esperava "${ESTADOS[alvo]}", mas a seção Atualizações mostra: ${texto}`)
+    }
+    if (Date.now() > prazo) throw new Error(`"${ESTADOS[alvo]}" não apareceu em ${limiteMs / 1000} s. A seção Atualizações mostra: ${texto}`)
+    await esperar(1_000)
   }
 }
 
@@ -329,7 +397,11 @@ test('atualiza N → N+1 pelo app', { tag: '@atualizacao' }, async () => {
   if (tipo !== 'teste' || !anterior) throw new Error('a atualização N → N+1 é do tipo teste e precisa de ROBO_ANTERIOR')
   if (compararVersoes(anterior.versao, nova) >= 0) throw new Error(`a anterior (${anterior.versao}) tem de ser menor que a nova (${nova})`)
   const variante = VARIANTES.teste
+  // O log é aberto antes de tudo: se o teste cair no meio, o artefato leva o que já aconteceu.
+  const anotar = abrirLog('windows_atualizacao_teste')
+  anotar(`atualização ${anterior.versao} → ${nova} pelo clique (canal teste)`)
   await conferirRotaDoCanalTeste(tag)
+  anotar(`rota do canal teste aponta pra ${tag}`)
 
   limparDadosDoApp(variante)
   await instalar(instalador(variante, anterior.versao))
@@ -341,45 +413,62 @@ test('atualiza N → N+1 pelo app', { tag: '@atualizacao' }, async () => {
   const velho = await abrirPeloPlaywright(exe, registroDaAnterior.pasta)
   let fechouPraInstalar = false
   try {
-    expect(await versaoDoApp(velho.app)).toBe(anterior.versao)
+    const antes = await versaoDoApp(velho.app)
+    anotar(`versão antes: ${antes} (DisplayVersion ${registroDaAnterior.versao})`)
+    expect(antes).toBe(anterior.versao)
     await esperarOInicio(velho.janela)
     const secao = await abrirAtualizacoes(velho.janela)
-    await procurarAgora(secao)
+    const ler = leitorDaSecao(secao, anterior.versao, anotar)
+    await ler()
+    await procurarAgora(secao, anotar)
     // Acha a N+1 na rota, confere a assinatura, baixa (~142 MB) e confere o sha512.
-    await esperarNaSecao(secao, TEXTO.pronta, [...PARADOS, TEXTO.emDia], 8 * 60_000)
+    await esperarNaSecao(ler, 'pronta', [...PARADOS, 'emDia'], 8 * 60_000)
     await expect(secao).toContainText(`Versão ${nova}`)
     await velho.janela.screenshot({ path: caminhoDoPrint('windows_atualizacao_pronta') })
     await secao.getByRole('button', { name: 'Ver as notas e instalar', exact: true }).click()
+    anotar('clique: Ver as notas e instalar')
     const instalarAgora = velho.janela.getByRole('dialog').getByRole('button', { name: 'Instalar agora', exact: true })
     await expect(instalarAgora).toBeEnabled()
+    await esperar(500) // a caixa termina de entrar (animação)
+    await velho.janela.screenshot({ path: caminhoDoPrint('windows_notas_instalar') })
     const fechou = velho.app.waitForEvent('close', { timeout: 60_000 })
+    anotar('clique: Instalar agora')
     // O app fecha logo depois do clique: o clique pode terminar com "alvo fechado", e tudo bem.
     await instalarAgora.click().catch(() => undefined)
     await fechou
     fechouPraInstalar = true
+    anotar('app fechou')
   } finally {
     if (!fechouPraInstalar) await velho.fechar()
   }
 
   // O instalador da N+1 troca os arquivos e reabre o app sozinho (--force-run), com --updated.
   const registro = await esperarRegistro(variante, nova, 3 * 60_000)
+  anotar(`DisplayVersion depois: ${registro.versao}`)
   const reaberto = await esperarProcessoPrincipal(registro.pasta, exe, 3 * 60_000)
+  anotar(`processo reaberto ${reaberto.linha.includes('--updated') ? 'com' : 'SEM'} --updated`)
   expect(reaberto.linha, 'o app reaberto pelo instalador leva --updated').toContain('--updated')
   // O reaberto segura a instância única: fecha ele pra abrir de novo pelo Playwright.
   await fecharProcessosDaPasta(registro.pasta)
 
   const novo = await abrirPeloPlaywright(exe, registro.pasta)
   try {
-    expect(await versaoDoApp(novo.app)).toBe(nova)
+    const reaberta = await versaoDoApp(novo.app)
+    anotar(`versão reaberta: ${reaberta}`)
+    expect(reaberta).toBe(nova)
     await esperarOInicio(novo.janela)
     const secao = await abrirAtualizacoes(novo.janela)
-    await procurarAgora(secao)
-    await esperarNaSecao(secao, TEXTO.emDia, [...PARADOS, TEXTO.pronta, TEXTO.encontrada], 2 * 60_000)
+    const ler = leitorDaSecao(secao, nova, anotar)
+    await ler()
+    await procurarAgora(secao, anotar)
+    await esperarNaSecao(ler, 'emDia', [...PARADOS, 'pronta', 'encontrada'], 2 * 60_000)
+    anotar(`em dia na ${reaberta}`)
     await novo.janela.screenshot({ path: caminhoDoPrint('windows_atualizou') })
   } finally {
     await novo.fechar()
   }
   await desinstalar(variante, registro)
+  anotar('desinstalado')
 })
 
 test('oficial: instala, confere os fusíveis, abre sem o Playwright, confere a integridade e desinstala', { tag: '@oficial' }, async () => {
