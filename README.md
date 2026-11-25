@@ -92,24 +92,46 @@ alguém dispara: o script de publicar da B Code ou a aba **Actions › robo-wind
 baixa o instalador do release (nunca código do app) e testa de fora pra dentro, como um cliente (o teste
 fica em `robo/`):
 
-- **teste** (pré-lançamento): instala em silêncio; abre em 1366x768 e em 1920x1080 e tira os prints;
-  mostra Ajustes › Atualizações; confere os fusíveis do Electron e a integridade do app (uma cópia com
-  1 caractere mexido no `app.asar` não abre; a cópia igual abre); desinstala. Com a versão anterior
-  informada, também instala a anterior e atualiza pelo próprio app até a nova (procura, baixa, confere,
-  instala, o app reabre sozinho e diz que está em dia). Essa parte usa o servidor de atualizações de
-  verdade: o canal teste já tem de apontar pra versão nova.
+- **teste** (pré-lançamento): instala em silêncio; abre em 1366x768 e em 1920x1080 e, nas 2, passeia
+  por todas as abas do menu (cada uma abre com o título, sem aviso de erro e sem rolagem de lado) e tira
+  os prints; mostra Ajustes › Atualizações; confere os fusíveis do Electron e a integridade do app (uma
+  cópia com 1 caractere mexido no `app.asar` não abre; a cópia igual abre); desinstala.
 - **oficial** (estável): instala, confere os fusíveis ("rodar como Node" e inspetor desligados,
   integridade ligada), abre sem o Playwright, tira o print, confere a integridade e desinstala.
+- **Com a versão anterior** informada (do mesmo tipo), o robô prova a atualização da anterior até a nova
+  pelo servidor de atualizações de verdade (o canal já tem de apontar pra versão nova):
+  - **pelo clique** (só no teste): instala a anterior; o próprio app procura, baixa e confere; o robô
+    abre **Ver as notas e instalar › Instalar agora**; o app fecha, a versão nova é instalada, o app
+    reabre sozinho e diz que está em dia.
+  - **sem clique** (nos 2 tipos; é o caminho da estável, porque o oficial não abre no Playwright):
+    instala a anterior e abre o app como um clique no atalho; o próprio app acha, baixa e confere a
+    versão nova (o instalador aparece com o nome final em `%LOCALAPPDATA%\<nome>-updater\pending` e
+    continua lá depois da 2ª conferência do app); o robô tira o print do cartão "Versão … pronta pra
+    instalar" e roda esse instalador com os mesmos argumentos que o app usa (`--updated /S --force-run`):
+    a versão nova fica instalada e o app reabre sozinho.
 - Em toda execução, um 2º trabalho procura chave privada no histórico inteiro deste repositório.
+
+| Tipo | Sem a anterior | Com a anterior |
+|---|---|---|
+| teste | `@teste` | `@teste`, `@atualizacao` (pelo clique) e `@sem-clique` |
+| oficial | `@oficial` | só `@sem-clique` (o publicar estável roda depois de apontar o canal) |
+
+Os prints e os logs de cada execução ficam no artefato `prints-windows` (30 dias). Cada atualização grava
+um log (`windows_atualizacao_teste.log` pelo clique; `windows_atualizacao_<tipo>_sem_clique.log` sem
+clique) com 1 linha por evento e a hora UTC: versão antes, estados que a tela mostrou, cliques, o app
+fechando, a versão no Windows depois, o app reaberto e a versão reaberta.
 
 Segurança: o robô só tem permissão de leitura, não usa segredo nenhum, as ações vêm fixadas pelo commit
 e ele não roda em pull request. **Os registros e os prints são públicos** (os prints ficam 30 dias): o app
 roda com a pasta de dados vazia (sem nome e sem chave de IA) e o registro só mostra versão e estado.
 
-Disparar à mão (exemplo):
+Disparar à mão (exemplos):
 
 ```sh
+# teste: a versão nova sozinha e a atualização da anterior até ela (pelo clique e sem clique)
 gh workflow run robo-windows.yml -f tipo=teste -f tag=v0.8.0-teste.131 -f anterior=v0.8.0-teste.130
+# oficial: a atualização sem clique da estável anterior (depois de o canal estável apontar pra nova)
+gh workflow run robo-windows.yml -f tipo=oficial -f tag=v0.9.0 -f anterior=v0.8.0
 ```
 
 ---
